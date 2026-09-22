@@ -77,8 +77,6 @@ MANUAL = {
     "wetsuit/wet suit": ("", "潜水服；防寒泳衣", "a close-fitting rubber suit worn for water sports"),
 }
 
-PHASES = {"阶段一": "core", "阶段二": "growth", "PET补充": "extension"}
-
 with SOURCE.open(encoding="utf-8") as file:
     source = json.load(file)
 
@@ -137,6 +135,22 @@ for item in source["master"]:
         definition_en = manual[2]
         coverage["manual"] += 1
 
+    tags = set((dic.get("tag") or "").split()) if dic else set()
+    oxford_core = bool(dic and str(dic.get("oxford", "")).strip() not in ("", "0"))
+    frequency = float(item.get("zipf_frequency") or 0)
+    if item["learning_stage"] == "阶段一":
+        phase = "core"
+        priority_reason = "共同核心词"
+    elif frequency >= 4.2:
+        phase = "growth"
+        priority_reason = "较高词频"
+    elif oxford_core or "zk" in tags:
+        phase = "growth"
+        priority_reason = "基础核心词"
+    else:
+        phase = "extension"
+        priority_reason = "低频或进阶词"
+
     primary_key = normalize(item.get("normalized_word", "") or word)
     output.append(
         {
@@ -151,13 +165,32 @@ for item in source["master"]:
             "exampleEn": item.get("example_en", ""),
             "exampleZh": item.get("example_zh", ""),
             "relatedWords": item.get("related_words", ""),
-            "phase": PHASES[item["learning_stage"]],
+            "phase": phase,
             "phaseOrder": item.get("stage_order"),
+            "frequency": frequency,
             "difficulty": item.get("difficulty", ""),
+            "priorityReason": priority_reason,
+            "oxfordCore": oxford_core,
             "isPhrase": bool(item.get("is_phrase")),
             "legacyPetId": pet_by_normalized.get(primary_key, ""),
         }
     )
+
+phase_index = {"core": 0, "growth": 1, "extension": 2}
+output.sort(
+    key=lambda item: (
+        phase_index[item["phase"]],
+        item["phaseOrder"] if item["phase"] == "core" and item["phaseOrder"] else 999999,
+        -item["frequency"],
+        item["isPhrase"],
+        len(item["word"]),
+        item["word"].lower(),
+    )
+)
+phase_counters = {"core": 0, "growth": 0, "extension": 0}
+for item in output:
+    phase_counters[item["phase"]] += 1
+    item["phaseOrder"] = phase_counters[item["phase"]]
 
 OUTPUT.parent.mkdir(parents=True, exist_ok=True)
 with OUTPUT.open("w", encoding="utf-8") as file:

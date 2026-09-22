@@ -21,7 +21,10 @@ type WordEntry = {
   relatedWords: string;
   phase: LearningPhase;
   phaseOrder: number | null;
+  frequency: number;
   difficulty: string;
+  priorityReason: string;
+  oxfordCore: boolean;
   isPhrase: boolean;
   legacyPetId: string;
 };
@@ -40,15 +43,17 @@ const LEGACY_SETTINGS_KEY = "pet-screening-settings-v1";
 
 const phaseLabels: Record<LearningPhase, string> = {
   core: "阶段一 · 核心词",
-  growth: "阶段二 · 进阶词",
-  extension: "阶段三 · 扩展词",
+  growth: "阶段二 · 常用词",
+  extension: "阶段三 · 提升词",
 };
 
 const phaseDescriptions: Record<LearningPhase, string> = {
   core: "两套词库共同覆盖的高价值词",
-  growth: "在核心词之上的进阶补充",
-  extension: "进一步扩大识词范围",
+  growth: "高频词与基础核心词",
+  extension: "相对低频或难度更高的词",
 };
+
+const phaseRank: Record<LearningPhase, number> = { core: 0, growth: 1, extension: 2 };
 
 const modeLabels: Record<PracticeMode, string> = {
   untested: "未测词优先",
@@ -116,7 +121,14 @@ export default function Home() {
     [],
   );
   const order = useMemo(
-    () => [...vocabulary].sort((a, b) => stableHash(`${today}-${a.id}`) - stableHash(`${today}-${b.id}`)),
+    () => [...vocabulary].sort((a, b) => {
+      const phaseDifference = phaseRank[a.phase] - phaseRank[b.phase];
+      if (phaseDifference) return phaseDifference;
+      const bandA = Math.floor(((a.phaseOrder || 999999) - 1) / 50);
+      const bandB = Math.floor(((b.phaseOrder || 999999) - 1) / 50);
+      if (bandA !== bandB) return bandA - bandB;
+      return stableHash(`${today}-${a.id}`) - stableHash(`${today}-${b.id}`);
+    }),
     [today],
   );
 
@@ -330,7 +342,7 @@ export default function Home() {
 
       <section className={`word-card ${revealed ? "is-revealed" : ""}`} aria-live="polite">
         <div className="card-meta">
-          <span>{phaseLabels[phase]} · {current.difficulty || "常用词"}</span>
+          <span>{phaseLabels[phase]} · {current.priorityReason} · {current.difficulty || "常用"}</span>
           <span>{modeCount ? `本组剩余 ${modeCount.toLocaleString()} 词` : "本组已完成"}</span>
         </div>
         {modeCount === 0 ? (
