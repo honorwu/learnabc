@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the compact, offline three-stage vocabulary dataset used by the app."""
+"""Build the compact, offline staged vocabulary dataset used by the app."""
 
 from __future__ import annotations
 
@@ -14,6 +14,18 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT.parent / "tmp" / "vocab_builder" / "vocabulary_data.json"
 ECDICT = ROOT.parent / "tmp" / "vocab_builder" / "ecdict.csv"
 OUTPUT = ROOT / "app" / "data" / "vocabulary.json"
+
+PHRASE_GROUP_ORDER = [
+    "get", "put", "turn", "look", "take", "go", "give", "keep", "set", "break",
+    "in", "at", "on", "out", "up", "by", "as",
+    "verb_other", "preposition_other", "noun_compound", "adjective_phrase", "daily_expression",
+]
+DIRECT_PHRASE_HEADS = set(PHRASE_GROUP_ORDER[:17])
+PREPOSITION_HEADS = {
+    "about", "above", "according", "across", "after", "apart", "around", "because",
+    "before", "behind", "below", "between", "due", "during", "for", "from", "into",
+    "near", "next", "of", "off", "over", "through", "to", "under", "with", "without",
+}
 
 
 def normalize(value: str) -> str:
@@ -37,6 +49,30 @@ def clean_translation(value: str) -> str:
     text = re.sub(r"\[网络\].*$", "", text)
     text = re.sub(r"\[[^\]]+\]\s*", "", text)
     return text.strip("； ")
+
+
+def phrase_head(value: str) -> str:
+    """Return the first lexical English token for phrase grouping."""
+    match = re.search(r"[a-z]+(?:'[a-z]+)?", normalize(value))
+    return match.group(0) if match else "#"
+
+
+def phrase_group(value: str, part_of_speech: str) -> tuple[str, str]:
+    """Give phrases a small, child-friendly set of practice groups."""
+    head = phrase_head(value)
+    if head in DIRECT_PHRASE_HEADS:
+        return head, head
+
+    pos = part_of_speech.lower().strip()
+    if "phr v" in pos or pos == "v" or pos.startswith("v ") or pos == "mv":
+        return head, "verb_other"
+    if head in PREPOSITION_HEADS or "prep" in pos or "adv" in pos or "conj" in pos or pos == "phr":
+        return head, "preposition_other"
+    if head == "driver's" or pos.startswith("n") or "(n" in pos:
+        return head, "noun_compound"
+    if "adj" in pos:
+        return head, "adjective_phrase"
+    return head, "daily_expression"
 
 
 MANUAL = {
@@ -138,7 +174,13 @@ for item in source["master"]:
     tags = set((dic.get("tag") or "").split()) if dic else set()
     oxford_core = bool(dic and str(dic.get("oxford", "")).strip() not in ("", "0"))
     frequency = float(item.get("zipf_frequency") or 0)
-    if item["learning_stage"] == "阶段一":
+    is_phrase = bool(item.get("is_phrase"))
+    part_of_speech = (item.get("part_of_speech") or "").strip("()")
+    head, group = phrase_group(word, part_of_speech) if is_phrase else ("", "")
+    if is_phrase:
+        phase = "phrases"
+        priority_reason = "词组专项"
+    elif item["learning_stage"] == "阶段一":
         phase = "core"
         priority_reason = "共同核心词"
     elif frequency >= 4.2:
@@ -158,7 +200,7 @@ for item in source["master"]:
             "word": word,
             "lemma": item.get("normalized_word", word),
             "letter": re.sub(r"[^a-z]", "", normalize(word))[:1].upper() or "#",
-            "pos": (item.get("part_of_speech") or "").strip("()"),
+            "pos": part_of_speech,
             "phonetic": phonetic,
             "translation": translation or "释义待补充",
             "definitionEn": definition_en,
@@ -170,24 +212,28 @@ for item in source["master"]:
             "frequency": frequency,
             "difficulty": item.get("difficulty", ""),
             "priorityReason": priority_reason,
+            "sourceScope": item.get("source_scope", ""),
             "oxfordCore": oxford_core,
-            "isPhrase": bool(item.get("is_phrase")),
+            "isPhrase": is_phrase,
+            "phraseHead": head,
+            "phraseGroup": group,
             "legacyPetId": pet_by_normalized.get(primary_key, ""),
         }
     )
 
-phase_index = {"core": 0, "growth": 1, "extension": 2}
+phase_index = {"core": 0, "growth": 1, "extension": 2, "phrases": 3}
+phrase_group_index = {group: index for index, group in enumerate(PHRASE_GROUP_ORDER)}
 output.sort(
     key=lambda item: (
         phase_index[item["phase"]],
         item["phaseOrder"] if item["phase"] == "core" and item["phaseOrder"] else 999999,
+        phrase_group_index.get(item["phraseGroup"], 999999) if item["phase"] == "phrases" else 0,
         -item["frequency"],
-        item["isPhrase"],
         len(item["word"]),
         item["word"].lower(),
     )
 )
-phase_counters = {"core": 0, "growth": 0, "extension": 0}
+phase_counters = {"core": 0, "growth": 0, "extension": 0, "phrases": 0}
 for item in output:
     phase_counters[item["phase"]] += 1
     item["phaseOrder"] = phase_counters[item["phase"]]
@@ -196,5 +242,12 @@ OUTPUT.parent.mkdir(parents=True, exist_ok=True)
 with OUTPUT.open("w", encoding="utf-8") as file:
     json.dump(output, file, ensure_ascii=False, separators=(",", ":"))
 
-counts = {phase: sum(1 for item in output if item["phase"] == phase) for phase in ("core", "growth", "extension")}
-print(json.dumps({"total": len(output), "phases": counts, "coverage": coverage, "output": str(OUTPUT)}, ensure_ascii=False))
+counts = {
+    phase: sum(1 for item in output if item["phase"] == phase)
+    for phase in ("core", "growth", "extension", "phrases")
+}
+phrase_groups = {
+    group: sum(1 for item in output if item["phraseGroup"] == group)
+    for group in PHRASE_GROUP_ORDER
+}
+print(json.dumps({"total": len(output), "phases": counts, "phraseGroups": phrase_groups, "coverage": coverage, "output": str(OUTPUT)}, ensure_ascii=False))

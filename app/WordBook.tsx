@@ -3,9 +3,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import rawVocabulary from "./data/vocabulary.json";
 
-type ResultStatus = "known" | "unsure" | "unknown";
-type PracticeMode = "untested" | "weak" | "unknown" | "all";
-type LearningPhase = "core" | "growth" | "extension";
+type ResultStatus = "known" | "unknown";
+type PracticeMode = "untested" | "unknown" | "all";
+type LearningPhase = "core" | "growth" | "extension" | "phrases";
+type PhraseGroup =
+  | "get" | "put" | "turn" | "look" | "take" | "go" | "give" | "keep" | "set" | "break"
+  | "in" | "at" | "on" | "out" | "up" | "by" | "as"
+  | "verb_other" | "preposition_other" | "noun_compound" | "adjective_phrase" | "daily_expression";
+type PhraseGroupFilter = "all" | PhraseGroup;
 
 type WordEntry = {
   id: string;
@@ -24,8 +29,11 @@ type WordEntry = {
   frequency: number;
   difficulty: string;
   priorityReason: string;
+  sourceScope: "PET" | "小托福" | "PET+小托福";
   oxfordCore: boolean;
   isPhrase: boolean;
+  phraseHead: string;
+  phraseGroup: PhraseGroup | "";
   legacyPetId: string;
 };
 
@@ -35,9 +43,17 @@ type Result = {
   updatedAt: string;
 };
 
+type StoredResult = Omit<Result, "status"> & { status: ResultStatus | "unsure" };
+
+type DailyActivity = Record<string, {
+  goal: number;
+  words: Record<string, ResultStatus>;
+}>;
+
 const vocabulary = rawVocabulary as WordEntry[];
 const RESULT_KEY = "word-ledger-results-v2";
 const SETTINGS_KEY = "word-ledger-settings-v2";
+const DAILY_ACTIVITY_KEY = "word-ledger-daily-v1";
 const LEGACY_RESULT_KEY = "pet-screening-results-v1";
 const LEGACY_SETTINGS_KEY = "pet-screening-settings-v1";
 
@@ -45,19 +61,55 @@ const phaseLabels: Record<LearningPhase, string> = {
   core: "阶段一 · 核心词",
   growth: "阶段二 · 常用词",
   extension: "阶段三 · 提升词",
+  phrases: "词组专项",
 };
 
 const phaseDescriptions: Record<LearningPhase, string> = {
   core: "两套词库共同覆盖的高价值词",
   growth: "高频词与基础核心词",
   extension: "相对低频或难度更高的词",
+  phrases: "分类浏览固定搭配与短语动词",
 };
 
-const phaseRank: Record<LearningPhase, number> = { core: 0, growth: 1, extension: 2 };
+const phaseRank: Record<LearningPhase, number> = { core: 0, growth: 1, extension: 2, phrases: 3 };
+
+const phraseGroupLabels: Record<PhraseGroupFilter, string> = {
+  all: "全部词组",
+  get: "get 开头",
+  put: "put 开头",
+  turn: "turn 开头",
+  look: "look 开头",
+  take: "take 开头",
+  go: "go 开头",
+  give: "give 开头",
+  keep: "keep 开头",
+  set: "set 开头",
+  break: "break 开头",
+  in: "in 开头",
+  at: "at 开头",
+  on: "on 开头",
+  out: "out 开头",
+  up: "up 开头",
+  by: "by 开头",
+  as: "as 开头",
+  verb_other: "其他动词词组",
+  preposition_other: "其他介词与固定搭配",
+  noun_compound: "名词与复合词",
+  adjective_phrase: "形容词与描述词组",
+  daily_expression: "日常表达",
+};
+
+const phraseGroupOrder = Object.keys(phraseGroupLabels) as PhraseGroupFilter[];
+const phraseVocabulary = vocabulary.filter((word) => word.phase === "phrases");
+const phraseGroupCounts = phraseGroupOrder.reduce((counts, group) => {
+  counts[group] = group === "all"
+    ? phraseVocabulary.length
+    : phraseVocabulary.filter((word) => word.phraseGroup === group).length;
+  return counts;
+}, {} as Record<PhraseGroupFilter, number>);
 
 const modeLabels: Record<PracticeMode, string> = {
   untested: "未测词优先",
-  weak: "模糊词复查",
   unknown: "不认识的词",
   all: "全部随机",
 };
@@ -76,6 +128,21 @@ function localDay(date = new Date()) {
   return `${year}-${month}-${day}`;
 }
 
+function recordDailyActivity(wordId: string, status: ResultStatus, goal: number) {
+  try {
+    const activity = JSON.parse(localStorage.getItem(DAILY_ACTIVITY_KEY) || "{}") as DailyActivity;
+    const day = localDay();
+    const current = activity[day] || { goal, words: {} };
+    activity[day] = {
+      goal,
+      words: { ...current.words, [wordId]: status },
+    };
+    localStorage.setItem(DAILY_ACTIVITY_KEY, JSON.stringify(activity));
+  } catch {
+    // A failed activity log must never interrupt the child's screening flow.
+  }
+}
+
 function stableHash(value: string) {
   let hash = 2166136261;
   for (let index = 0; index < value.length; index += 1) {
@@ -88,9 +155,12 @@ function stableHash(value: string) {
 function matchesMode(id: string, mode: PracticeMode, results: Record<string, Result>) {
   const status = results[id]?.status;
   if (mode === "untested") return !status;
-  if (mode === "weak") return status === "unsure" || status === "unknown";
   if (mode === "unknown") return status === "unknown";
   return true;
+}
+
+function matchesPhraseGroup(word: WordEntry, phase: LearningPhase, group: PhraseGroupFilter) {
+  return phase !== "phrases" || group === "all" || word.phraseGroup === group;
 }
 
 function displayPos(pos: string) {
@@ -98,16 +168,12 @@ function displayPos(pos: string) {
   return pos.split(" & ").map((part) => posLabels[part] || part).join(" / ");
 }
 
-function csvCell(value: string | number) {
-  const text = String(value ?? "");
-  return `"${text.replaceAll('"', '""')}"`;
-}
-
 export default function WordBook() {
   const today = localDay();
   const [results, setResults] = useState<Record<string, Result>>({});
   const [mode, setMode] = useState<PracticeMode>("untested");
   const [phase, setPhase] = useState<LearningPhase>("core");
+  const [phraseGroup, setPhraseGroup] = useState<PhraseGroupFilter>("all");
   const [goal, setGoal] = useState(20);
   const [currentId, setCurrentId] = useState(vocabulary[0].id);
   const [revealed, setRevealed] = useState(false);
@@ -137,34 +203,57 @@ export default function WordBook() {
     afterId: string,
     nextMode = mode,
     nextPhase = phase,
+    nextPhraseGroup = phraseGroup,
   ) => {
     const start = Math.max(0, order.findIndex((word) => word.id === afterId));
     for (let offset = 1; offset <= order.length; offset += 1) {
       const candidate = order[(start + offset) % order.length];
-      if (candidate.phase === nextPhase && matchesMode(candidate.id, nextMode, nextResults)) return candidate.id;
+      if (
+        candidate.phase === nextPhase
+        && matchesPhraseGroup(candidate, nextPhase, nextPhraseGroup)
+        && matchesMode(candidate.id, nextMode, nextResults)
+      ) return candidate.id;
     }
     return afterId;
-  }, [mode, order, phase]);
+  }, [mode, order, phase, phraseGroup]);
 
   useEffect(() => {
     try {
       const stored = localStorage.getItem(RESULT_KEY) || localStorage.getItem(LEGACY_RESULT_KEY) || "{}";
-      const originalResults = JSON.parse(stored) as Record<string, Result>;
+      const originalResults = JSON.parse(stored) as Record<string, StoredResult>;
       const savedResults: Record<string, Result> = {};
       Object.entries(originalResults).forEach(([id, result]) => {
         const migratedId = wordMap.has(id) ? id : legacyMap.get(id);
-        if (migratedId) savedResults[migratedId] = result;
+        if (migratedId) {
+          savedResults[migratedId] = {
+            ...result,
+            status: result.status === "known" ? "known" : "unknown",
+          };
+        }
       });
       const storedSettings = localStorage.getItem(SETTINGS_KEY) || localStorage.getItem(LEGACY_SETTINGS_KEY) || "{}";
-      const settings = JSON.parse(storedSettings) as { goal?: number; mode?: PracticeMode; phase?: LearningPhase };
+      const settings = JSON.parse(storedSettings) as {
+        goal?: number;
+        mode?: PracticeMode;
+        phase?: LearningPhase;
+        phraseGroup?: PhraseGroupFilter;
+      };
       const savedMode = settings.mode && modeLabels[settings.mode] ? settings.mode : "untested";
       const savedPhase = settings.phase && phaseLabels[settings.phase] ? settings.phase : "core";
+      const savedPhraseGroup = savedPhase === "phrases"
+        && settings.phraseGroup
+        && phraseGroupLabels[settings.phraseGroup]
+        ? settings.phraseGroup
+        : "all";
       setResults(savedResults);
       setMode(savedMode);
       setPhase(savedPhase);
+      setPhraseGroup(savedPhraseGroup);
       setGoal([10, 20, 30, 50].includes(settings.goal || 0) ? settings.goal! : 20);
       setCurrentId(
-        order.find((word) => word.phase === savedPhase && matchesMode(word.id, savedMode, savedResults))?.id
+        order.find((word) => word.phase === savedPhase
+          && matchesPhraseGroup(word, savedPhase, savedPhraseGroup)
+          && matchesMode(word.id, savedMode, savedResults))?.id
         || order.find((word) => word.phase === savedPhase)?.id
         || order[0].id,
       );
@@ -182,17 +271,27 @@ export default function WordBook() {
   }, [toast]);
 
   const current = wordMap.get(currentId) || vocabulary[0];
-  const phaseWords = useMemo(() => vocabulary.filter((word) => word.phase === phase), [phase]);
+  const phaseWords = useMemo(
+    () => vocabulary.filter((word) => word.phase === phase && matchesPhraseGroup(word, phase, phraseGroup)),
+    [phase, phraseGroup],
+  );
+  const phraseSections = useMemo(() => {
+    const groups = phraseGroup === "all"
+      ? phraseGroupOrder.filter((group): group is PhraseGroup => group !== "all")
+      : [phraseGroup];
+    return groups.map((group) => ({
+      group,
+      words: phraseVocabulary.filter((word) => word.phraseGroup === group),
+    })).filter((section) => section.words.length > 0);
+  }, [phraseGroup]);
   const stats = useMemo(() => {
     const values = phaseWords.map((word) => results[word.id]).filter(Boolean);
-    const allValues = Object.entries(results).filter(([id]) => wordMap.has(id)).map(([, result]) => result);
+    const allValues = Object.entries(results)
+      .filter(([id]) => wordMap.get(id)?.phase !== "phrases")
+      .map(([, result]) => result);
     return {
       tested: values.length,
-      known: values.filter((item) => item.status === "known").length,
-      unsure: values.filter((item) => item.status === "unsure").length,
-      unknown: values.filter((item) => item.status === "unknown").length,
-      today: allValues.filter((item) => item.updatedAt.startsWith(today)).length,
-      globalTested: allValues.length,
+      today: allValues.filter((item) => localDay(new Date(item.updatedAt)) === today).length,
     };
   }, [phaseWords, results, today, wordMap]);
 
@@ -205,20 +304,36 @@ export default function WordBook() {
     setMode(nextMode);
     setRevealed(false);
     setPanelOpen(false);
-    const next = order.find((word) => word.phase === phase && matchesMode(word.id, nextMode, results));
+    const next = order.find((word) => word.phase === phase
+      && matchesPhraseGroup(word, phase, phraseGroup)
+      && matchesMode(word.id, nextMode, results));
     if (next) setCurrentId(next.id);
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify({ goal, mode: nextMode, phase }));
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify({ goal, mode: nextMode, phase, phraseGroup }));
   };
 
   const choosePhase = (nextPhase: LearningPhase) => {
     setPhase(nextPhase);
     setMode("untested");
+    setPhraseGroup("all");
     setRevealed(false);
     setPanelOpen(false);
     const next = order.find((word) => word.phase === nextPhase && matchesMode(word.id, "untested", results))
       || order.find((word) => word.phase === nextPhase);
     if (next) setCurrentId(next.id);
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify({ goal, mode: "untested", phase: nextPhase }));
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify({ goal, mode: "untested", phase: nextPhase, phraseGroup: "all" }));
+  };
+
+  const choosePhraseGroup = (nextGroup: PhraseGroupFilter) => {
+    setPhraseGroup(nextGroup);
+    setMode("untested");
+    setRevealed(false);
+    setPanelOpen(false);
+    const next = order.find((word) => word.phase === "phrases"
+      && matchesPhraseGroup(word, "phrases", nextGroup)
+      && matchesMode(word.id, "untested", results))
+      || order.find((word) => word.phase === "phrases" && matchesPhraseGroup(word, "phrases", nextGroup));
+    if (next) setCurrentId(next.id);
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify({ goal, mode: "untested", phase: "phrases", phraseGroup: nextGroup }));
   };
 
   const judge = useCallback((status: ResultStatus) => {
@@ -232,16 +347,31 @@ export default function WordBook() {
       },
     };
     localStorage.setItem(RESULT_KEY, JSON.stringify(nextResults));
+    recordDailyActivity(currentId, status, goal);
     setResults(nextResults);
     setRevealed(false);
-    setToast(status === "known" ? "已记录：认识" : status === "unsure" ? "已记录：有点模糊" : "已记录：不认识");
+    setToast(status === "known" ? "已记录：认识" : "已记录：不认识");
     setCurrentId(findNext(nextResults, currentId));
-  }, [currentId, findNext, results]);
+  }, [currentId, findNext, goal, results]);
 
   const skip = useCallback(() => {
     setRevealed(false);
     setCurrentId(findNext(results, currentId));
   }, [currentId, findNext, results]);
+
+  const pronounce = useCallback(() => {
+    if (!("speechSynthesis" in window)) return;
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(current.lemma || current.word);
+    utterance.lang = "en-GB";
+    utterance.rate = 0.82;
+    window.speechSynthesis.speak(utterance);
+  }, [current]);
+
+  const revealAnswer = useCallback(() => {
+    setRevealed(true);
+    pronounce();
+  }, [pronounce]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -250,65 +380,21 @@ export default function WordBook() {
         setPanelOpen(false);
         return;
       }
-      if (panelOpen) return;
+      if (panelOpen || phase === "phrases") return;
       if (event.code === "Space" && !revealed) {
         event.preventDefault();
-        setRevealed(true);
+        revealAnswer();
       } else if (revealed && event.key === "1") judge("unknown");
-      else if (revealed && event.key === "2") judge("unsure");
-      else if (revealed && event.key === "3") judge("known");
+      else if (revealed && event.key === "2") judge("known");
       else if (event.key === "ArrowRight") skip();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [judge, panelOpen, revealed, skip]);
-
-  const pronounce = () => {
-    if (!("speechSynthesis" in window)) return;
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(current.lemma || current.word);
-    utterance.lang = "en-GB";
-    utterance.rate = 0.82;
-    window.speechSynthesis.speak(utterance);
-  };
+  }, [judge, panelOpen, phase, revealAnswer, revealed, skip]);
 
   const updateGoal = (nextGoal: number) => {
     setGoal(nextGoal);
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify({ goal: nextGoal, mode, phase }));
-  };
-
-  const exportProgress = () => {
-    const rows = [["词汇编号", "阶段", "单词", "判断", "判断次数", "最后判断时间", "中文释义"]];
-    vocabulary.forEach((word) => {
-      const result = results[word.id];
-      if (!result) return;
-      const status = result.status === "known" ? "认识" : result.status === "unsure" ? "有点模糊" : "不认识";
-      rows.push([word.id, phaseLabels[word.phase], word.word, status, String(result.attempts), result.updatedAt, word.translation]);
-    });
-    const csv = `\uFEFF${rows.map((row) => row.map(csvCell).join(",")).join("\n")}`;
-    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `认词簿_${today}.csv`;
-    link.click();
-    URL.revokeObjectURL(url);
-  };
-
-  const resetProgress = () => {
-    if (!window.confirm("确定清空全部判断记录吗？此操作无法撤销。")) return;
-    localStorage.removeItem(RESULT_KEY);
-    localStorage.removeItem(LEGACY_RESULT_KEY);
-    setResults({});
-    setMode("untested");
-    setPhase("core");
-    setCurrentId(order.find((word) => word.phase === "core")?.id || order[0].id);
-    setRevealed(false);
-    setPanelOpen(false);
-  };
-
-  const signOut = async () => {
-    await fetch("/api/access", { method: "DELETE" });
-    window.location.assign("/login");
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify({ goal: nextGoal, mode, phase, phraseGroup }));
   };
 
   const testedPercent = Math.round((stats.tested / phaseWords.length) * 100);
@@ -321,42 +407,100 @@ export default function WordBook() {
           <span className="brand-mark" aria-hidden="true">A·</span>
           <div>
             <strong>认词簿</strong>
-            <span>先说意思，再看答案</span>
+            <span>{phase === "phrases" ? "分类查看词组与释义" : "先说意思，再看答案"}</span>
           </div>
         </div>
         <div className="top-actions">
-          <div className={`progress-pill ${stats.today >= goal ? "complete" : ""}`}>
-            {stats.today >= goal ? "今日目标完成 ✓" : `今日 ${stats.today} / ${goal}`}
+          <div className={`progress-pill ${phase !== "phrases" && stats.today >= goal ? "complete" : ""}`}>
+            {phase === "phrases"
+              ? `词组表 · ${phraseVocabulary.length} 个`
+              : stats.today >= goal ? "今日目标完成 ✓" : `今日 ${stats.today} / ${goal}`}
           </div>
-          <button className="records-button" type="button" onClick={() => setPanelOpen(true)} aria-label="打开学习记录">
-            <span aria-hidden="true">▥</span><span>学习记录</span>
-          </button>
         </div>
       </header>
 
-      <section className="session-bar" aria-label="筛查进度">
-        <button className="mode-summary" type="button" onClick={() => setPanelOpen(true)}>
+      <section className="session-bar" aria-label={phase === "phrases" ? "词组浏览" : "筛查进度"}>
+        <button className="mode-summary" type="button" onClick={() => setPanelOpen(true)} aria-label="打开学习设置">
           <span className="eyebrow">{phaseLabels[phase]}</span>
-          <strong>{modeLabels[mode]} · {modeCount.toLocaleString()} 词</strong>
+          <strong>
+            {phase === "phrases"
+              ? `${phraseGroupLabels[phraseGroup]} · ${phaseWords.length.toLocaleString()} 个`
+              : `${modeLabels[mode]} · ${modeCount.toLocaleString()} 词`}
+          </strong>
         </button>
-        <div className="progress-track" aria-label={`总进度 ${testedPercent}%`}>
-          <span style={{ width: `${testedPercent}%` }} />
-        </div>
-        <span className="remaining">本阶段 {stats.tested.toLocaleString()} / {phaseWords.length.toLocaleString()}</span>
+        {phase === "phrases" ? (
+          <span className="browse-note">直接浏览，不计入辨识进度</span>
+        ) : (
+          <>
+            <div className="progress-track" aria-label={`总进度 ${testedPercent}%`}>
+              <span style={{ width: `${testedPercent}%` }} />
+            </div>
+            <span className="remaining">本阶段 {stats.tested.toLocaleString()} / {phaseWords.length.toLocaleString()}</span>
+          </>
+        )}
       </section>
 
+      {phase === "phrases" && (
+        <section className="phrase-filter-bar" aria-label="词组分类">
+          <div>
+            <span className="eyebrow">PHRASE GROUP</span>
+            <strong>按开头与结构分类浏览</strong>
+          </div>
+          <label>
+            <span>当前分类</span>
+            <select
+              value={phraseGroup}
+              onChange={(event) => choosePhraseGroup(event.target.value as PhraseGroupFilter)}
+            >
+              {phraseGroupOrder.map((group) => (
+                <option key={group} value={group}>
+                  {phraseGroupLabels[group]} · {phraseGroupCounts[group]} 个
+                </option>
+              ))}
+            </select>
+          </label>
+        </section>
+      )}
+
+      {phase === "phrases" ? (
+        <section className="phrase-library" aria-label={`${phraseGroupLabels[phraseGroup]}词组表`}>
+          {phraseSections.map((section) => (
+            <section className="phrase-section" key={section.group}>
+              <header>
+                <div>
+                  <span className="eyebrow">PHRASE LIST</span>
+                  <h2>{phraseGroupLabels[section.group]}</h2>
+                </div>
+                <strong>{section.words.length} 个</strong>
+              </header>
+              <div className="phrase-grid">
+                {section.words.map((word) => (
+                  <article className="phrase-row" key={word.id}>
+                    <strong>{word.word}</strong>
+                    <span>{word.translation}</span>
+                  </article>
+                ))}
+              </div>
+            </section>
+          ))}
+        </section>
+      ) : (
       <section className={`word-card ${revealed ? "is-revealed" : ""}`} aria-live="polite">
         <div className="card-meta">
-          <span>{phaseLabels[phase]} · {current.priorityReason} · {current.difficulty || "常用"}</span>
+          <span>
+            {phaseLabels[phase]}
+            {phase === "phrases" ? ` · ${phraseGroupLabels[phraseGroup]}` : ` · ${current.priorityReason}`}
+            {` · ${current.difficulty || "常用"}`}
+          </span>
           <span>{modeCount ? `本组剩余 ${modeCount.toLocaleString()} 词` : "本组已完成"}</span>
         </div>
         {modeCount === 0 ? (
           <div className="empty-state">
             <span className="finish-mark">✓</span>
             <h1>这一组已经完成</h1>
-            <p>可以复查模糊词，或者切换到下一个阶段。</p>
+            <p>可以复查不认识的词，或者切换到下一个阶段。</p>
             <div>
-              <button type="button" onClick={() => chooseMode("weak")}>复查薄弱词</button>
+              <button type="button" onClick={() => chooseMode("unknown")}>复查不认识的词</button>
               <button type="button" onClick={() => setPanelOpen(true)}>切换阶段</button>
             </div>
           </div>
@@ -367,7 +511,7 @@ export default function WordBook() {
 
             {!revealed ? (
               <div className="reveal-area">
-                <button className="reveal-button" onClick={() => setRevealed(true)}>
+                <button className="reveal-button" onClick={revealAnswer}>
                   查看答案 <span>空格键</span>
                 </button>
                 <button className="skip-button" type="button" onClick={skip}>暂时跳过 <span>→</span></button>
@@ -392,13 +536,10 @@ export default function WordBook() {
                 {current.relatedWords && <p className="source-note">相关词：{current.relatedWords}</p>}
                 <div className="judge-row">
                   <button className="judge no" onClick={() => judge("unknown")}>
-                    <span className="judge-key">1</span><span><strong>不认识</strong><small>完全没想起来</small></span>
-                  </button>
-                  <button className="judge maybe" onClick={() => judge("unsure")}>
-                    <span className="judge-key">2</span><span><strong>有点模糊</strong><small>只说对一部分</small></span>
+                    <span className="judge-key">1</span><span><strong>不认识</strong><small>留到后面继续学</small></span>
                   </button>
                   <button className="judge yes" onClick={() => judge("known")}>
-                    <span className="judge-key">3</span><span><strong>认识</strong><small>主要意思说对了</small></span>
+                    <span className="judge-key">2</span><span><strong>认识</strong><small>从学习池中剔除</small></span>
                   </button>
                 </div>
               </div>
@@ -406,32 +547,23 @@ export default function WordBook() {
           </div>
         )}
       </section>
+      )}
 
       <footer className="hint-row">
-        <span>答案出现前不显示音标与词性，避免无意提示</span>
-        <span className="today-track"><i style={{ width: `${todayPercent}%` }} /> 今日完成度 {todayPercent}%</span>
+        <span>{phase === "phrases" ? "词组表仅供浏览，不需要逐个判断" : "答案出现前不显示音标与词性，避免无意提示"}</span>
+        {phase !== "phrases" && (
+          <span className="today-track"><i style={{ width: `${todayPercent}%` }} /> 今日完成度 {todayPercent}%</span>
+        )}
       </footer>
 
       {toast && <div className="toast" role="status">{toast}</div>}
 
       {panelOpen && (
         <div className="panel-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setPanelOpen(false)}>
-          <aside className="records-panel" aria-label="学习记录">
+          <aside className="records-panel" aria-label="学习设置">
             <div className="panel-header">
-              <div><span className="eyebrow">MY PROGRESS</span><h2>学习记录</h2></div>
+              <div><span className="eyebrow">STUDY SETTINGS</span><h2>学习设置</h2></div>
               <button type="button" onClick={() => setPanelOpen(false)} aria-label="关闭">×</button>
-            </div>
-
-            <div className="overall-progress">
-              <div><strong>{testedPercent}%</strong><span>{phaseLabels[phase]}完成度</span></div>
-              <div className="progress-track"><span style={{ width: `${testedPercent}%` }} /></div>
-            </div>
-
-            <div className="stat-grid">
-              <div><span className="dot green" /><strong>{stats.known}</strong><small>认识</small></div>
-              <div><span className="dot amber" /><strong>{stats.unsure}</strong><small>模糊</small></div>
-              <div><span className="dot red" /><strong>{stats.unknown}</strong><small>不认识</small></div>
-              <div><span className="dot navy" /><strong>{phaseWords.length - stats.tested}</strong><small>未筛查</small></div>
             </div>
 
             <section className="panel-section">
@@ -447,37 +579,34 @@ export default function WordBook() {
                   );
                 })}
               </div>
-              <p className="library-note">完整词库 {vocabulary.length.toLocaleString()} 词，已辨识 {stats.globalTested.toLocaleString()} 词</p>
+              <p className="library-note">完整词库 {vocabulary.length.toLocaleString()} 条，统计信息请在学习记录后台查看。</p>
             </section>
 
-            <section className="panel-section">
-              <h3>选择筛查模式</h3>
-              <div className="mode-list">
-                {(Object.keys(modeLabels) as PracticeMode[]).map((item) => (
-                  <button key={item} className={mode === item ? "active" : ""} onClick={() => chooseMode(item)}>
-                    <span>{modeLabels[item]}</span>
-                    <small>{phaseWords.reduce((count, word) => count + (matchesMode(word.id, item, results) ? 1 : 0), 0)} 词</small>
-                  </button>
-                ))}
-              </div>
-            </section>
+            {phase !== "phrases" && (
+              <section className="panel-section">
+                <h3>选择筛查模式</h3>
+                <div className="mode-list">
+                  {(Object.keys(modeLabels) as PracticeMode[]).map((item) => (
+                    <button key={item} className={mode === item ? "active" : ""} onClick={() => chooseMode(item)}>
+                      <span>{modeLabels[item]}</span>
+                      <small>{phaseWords.reduce((count, word) => count + (matchesMode(word.id, item, results) ? 1 : 0), 0)} 词</small>
+                    </button>
+                  ))}
+                </div>
+              </section>
+            )}
 
-            <section className="panel-section">
-              <h3>每日目标</h3>
-              <div className="goal-row">
-                {[10, 20, 30, 50].map((item) => (
-                  <button key={item} className={goal === item ? "active" : ""} onClick={() => updateGoal(item)}>{item} 词</button>
-                ))}
-              </div>
-            </section>
+            {phase !== "phrases" && (
+              <section className="panel-section">
+                <h3>每日目标</h3>
+                <div className="goal-row">
+                  {[10, 20, 30, 50].map((item) => (
+                    <button key={item} className={goal === item ? "active" : ""} onClick={() => updateGoal(item)}>{item} 词</button>
+                  ))}
+                </div>
+              </section>
+            )}
 
-            <section className="panel-section data-actions">
-              <h3>数据管理</h3>
-              <button className="export-button" type="button" onClick={exportProgress} disabled={!stats.globalTested}>导出辨识结果 CSV</button>
-              <button className="reset-button" type="button" onClick={resetProgress} disabled={!stats.globalTested}>清空全部记录</button>
-              <button className="signout-button" type="button" onClick={signOut}>退出当前设备</button>
-              <p>记录只保存在当前浏览器中，不会上传。</p>
-            </section>
           </aside>
         </div>
       )}
