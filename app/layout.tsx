@@ -13,9 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://pet-vocab-check-drwu.codex788843.chatgpt.site"),
-  title: "PET 认词筛查",
-  description: "面向孩子的 PET 词汇认识度筛查工具。",
+  title: "认词簿",
+  description: "安静、专注的词汇辨识工具。",
   icons: {
     icon: "/favicon.svg",
     shortcut: "/favicon.svg",

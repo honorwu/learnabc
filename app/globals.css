@@ -149,6 +149,23 @@ button:focus-visible { outline: 3px solid rgba(235,102,55,.28); outline-offset: 
 .judge.yes { color: var(--green); background: var(--green-soft); border-color: #bdd9ce; }
 .judge.yes:hover { background: #deeee7; }
 
+.empty-state {
+  min-height: 450px; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  text-align: center;
+}
+.finish-mark {
+  width: 54px; height: 54px; display: grid; place-items: center; border-radius: 50%;
+  background: var(--green-soft); color: var(--green); font-size: 24px; font-weight: 800;
+}
+.empty-state h1 { margin: 20px 0 7px; font-size: 31px; letter-spacing: -1px; }
+.empty-state p { margin: 0; color: var(--muted); font-size: 13px; }
+.empty-state > div { display: flex; gap: 8px; margin-top: 25px; }
+.empty-state button {
+  padding: 11px 16px; border: 1px solid var(--line); border-radius: 12px; background: white;
+  cursor: pointer; font-size: 11px; font-weight: 700;
+}
+.empty-state button:last-child { background: var(--ink); border-color: var(--ink); color: white; }
+
 .hint-row { min-height: 20px; color: var(--muted); font-size: 10px; }
 .today-track { display: flex; align-items: center; gap: 8px; }
 .today-track::before { content: ""; width: 70px; height: 3px; border-radius: 999px; background: #d9d6cd; }
@@ -189,6 +206,19 @@ button:focus-visible { outline: 3px solid rgba(235,102,55,.28); outline-offset: 
 .dot.red { background: var(--red); } .dot.navy { background: var(--ink); }
 .panel-section { margin-top: 25px; }
 .panel-section h3 { margin: 0 0 11px; font-size: 12px; }
+.phase-list { display: grid; gap: 7px; }
+.phase-list button {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  width: 100%; padding: 11px 12px; border: 1px solid var(--line); border-radius: 12px;
+  background: white; text-align: left; cursor: pointer;
+}
+.phase-list button span, .phase-list button strong, .phase-list button small { display: block; }
+.phase-list button strong { font-size: 11px; }
+.phase-list button small { margin-top: 3px; color: var(--muted); font-size: 9px; font-weight: 400; }
+.phase-list button b { min-width: 42px; color: var(--muted); font-size: 11px; text-align: right; }
+.phase-list button.active { border-color: var(--ink); background: #f0f1f3; box-shadow: inset 3px 0 0 var(--ink); }
+.phase-list button.active b { color: var(--ink); }
+.library-note { margin: 9px 2px 0; color: var(--muted); font-size: 9px; }
 .mode-list { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .mode-list button {
   display: flex; align-items: center; justify-content: space-between; padding: 11px 12px;
