@@ -51,7 +51,7 @@ export async function POST(request: Request) {
 
   attemptWindows.delete(client);
   const token = await createSessionToken(secret);
-  const secure = new URL(request.url).protocol === "https:" ? "; Secure" : "";
+  const secure = secureCookieAttribute(request);
   return json(
     { authenticated: true },
     200,
@@ -60,7 +60,7 @@ export async function POST(request: Request) {
 }
 
 export async function DELETE(request: Request) {
-  const secure = new URL(request.url).protocol === "https:" ? "; Secure" : "";
+  const secure = secureCookieAttribute(request);
   return json(
     { authenticated: false },
     200,
@@ -68,13 +68,22 @@ export async function DELETE(request: Request) {
   );
 }
 
+function secureCookieAttribute(request: Request): string {
+  const forwardedProtocol = request.headers.get("x-forwarded-proto")
+    ?.split(",")[0]
+    ?.trim()
+    .toLowerCase();
+  return forwardedProtocol === "https" || new URL(request.url).protocol === "https:"
+    ? "; Secure"
+    : "";
+}
+
 function readCookie(header: string | null, name: string): string | undefined {
   return header?.split(";").map((part) => part.trim()).find((part) => part.startsWith(`${name}=`))?.slice(name.length + 1);
 }
 
 function clientKey(request: Request): string {
-  return request.headers.get("cf-connecting-ip")
-    || request.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
+  return request.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
     || "local";
 }
 

@@ -1,0 +1,13 @@
+.git
+.next
+dist
+node_modules
+data
+
+.env*
+!.env.example
+DEPLOYMENT.local.md
+
+*.log
+*.tsbuildinfo
+.DS_Store

@@ -54,7 +54,6 @@ export default function LoginPage() {
             value={code}
             onChange={(event) => setCode(event.target.value.toUpperCase())}
             autoComplete="current-password"
-            autoFocus
             maxLength={64}
             placeholder="请输入访问码"
           />

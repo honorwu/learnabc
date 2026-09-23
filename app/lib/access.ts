@@ -1,13 +1,10 @@
-import { env } from "cloudflare:workers";
-
 export const ACCESS_COOKIE = "word_ledger_access";
 export const ACCESS_MAX_AGE = 60 * 60 * 24 * 30;
 
 const SESSION_MESSAGE = "word-ledger-family-session-v1";
 
 export function getAccessCode(): string | null {
-  const runtimeCode = (env as unknown as { ACCESS_CODE?: string }).ACCESS_CODE;
-  const value = runtimeCode || process.env.ACCESS_CODE;
+  const value = process.env.ACCESS_CODE;
   return value?.trim().toUpperCase() || null;
 }
 
@@ -38,6 +35,13 @@ export async function verifySessionToken(token: string | undefined, secret: stri
   return constantTimeEqual(new TextEncoder().encode(token), new TextEncoder().encode(expected));
 }
 
+export async function requestHasAccess(request: Request): Promise<boolean> {
+  const secret = getAccessCode();
+  if (!secret) return false;
+  const token = readCookie(request.headers.get("cookie"), ACCESS_COOKIE);
+  return verifySessionToken(token, secret);
+}
+
 async function digest(value: string): Promise<Uint8Array> {
   const data = new TextEncoder().encode(value);
   return new Uint8Array(await crypto.subtle.digest("SHA-256", data));
@@ -52,4 +56,11 @@ function constantTimeEqual(left: Uint8Array, right: Uint8Array): boolean {
 
 function toHex(bytes: Uint8Array): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function readCookie(header: string | null, name: string): string | undefined {
+  return header?.split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith(`${name}=`))
+    ?.slice(name.length + 1);
 }

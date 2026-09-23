@@ -1,32 +1,17 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import rawVocabulary from "../data/vocabulary.json";
+import { useMemo, useState } from "react";
+import Link from "next/link";
+import { GOAL_OPTIONS, type DailyActivity, type LearningPhase, type LearningResult as Result, type LearningSnapshot } from "../lib/learning-types";
+import type { VocabularySummaryEntry } from "../lib/vocabulary";
 
-type ResultStatus = "known" | "unknown";
-type LearningPhase = "core" | "growth" | "extension" | "phrases";
 type SourceScope = "PET" | "小托福" | "PET+小托福";
 
-type WordEntry = {
+type SummaryWord = VocabularySummaryEntry & {
   id: string;
-  word: string;
   phase: LearningPhase;
   sourceScope: SourceScope;
-  legacyPetId: string;
 };
-
-type Result = {
-  status: ResultStatus;
-  attempts: number;
-  updatedAt: string;
-};
-
-type StoredResult = Omit<Result, "status"> & { status: ResultStatus | "unsure" };
-
-type DailyActivity = Record<string, {
-  goal: number;
-  words: Record<string, ResultStatus>;
-}>;
 
 type Summary = {
   total: number;
@@ -37,31 +22,13 @@ type Summary = {
   percent: number;
 };
 
-const vocabulary = rawVocabulary as WordEntry[];
-const screeningWords = vocabulary.filter((word) => word.phase !== "phrases");
-const phraseWords = vocabulary.filter((word) => word.phase === "phrases");
-const screeningIds = new Set(screeningWords.map((word) => word.id));
-const RESULT_KEY = "word-ledger-results-v2";
-const LEGACY_RESULT_KEY = "pet-screening-results-v1";
-const SETTINGS_KEY = "word-ledger-settings-v2";
-const LEGACY_SETTINGS_KEY = "pet-screening-settings-v1";
-const DAILY_ACTIVITY_KEY = "word-ledger-daily-v1";
-const GOAL_OPTIONS = [10, 20, 30, 50];
-
 const phaseDetails: Array<{ phase: Exclude<LearningPhase, "phrases">; label: string; note: string }> = [
   { phase: "core", label: "阶段一 · 核心词", note: "两套词库共同收录" },
   { phase: "growth", label: "阶段二 · 常用词", note: "高频词与基础核心词" },
   { phase: "extension", label: "阶段三 · 提升词", note: "相对低频或难度更高" },
 ];
 
-function localDay(date = new Date()) {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
-function summarize(words: WordEntry[], results: Record<string, Result>): Summary {
+function summarize(words: SummaryWord[], results: Record<string, Result>): Summary {
   const statuses = words.map((word) => results[word.id]?.status).filter(Boolean);
   const known = statuses.filter((status) => status === "known").length;
   const unknown = statuses.filter((status) => status === "unknown").length;
@@ -76,12 +43,16 @@ function summarize(words: WordEntry[], results: Record<string, Result>): Summary
   };
 }
 
-function summarizeDay(record: DailyActivity[string] | undefined, fallbackGoal: number) {
+function summarizeDay(
+  record: DailyActivity[string] | undefined,
+  fallbackGoal: number,
+  screeningIds: Set<string>,
+) {
   const entries = Object.entries(record?.words || {}).filter(([id]) => screeningIds.has(id));
   const known = entries.filter(([, status]) => status === "known").length;
   const unknown = entries.filter(([, status]) => status === "unknown").length;
   const count = known + unknown;
-  const goal = GOAL_OPTIONS.includes(record?.goal || 0) ? record!.goal : fallbackGoal;
+  const goal = GOAL_OPTIONS.some((option) => option === record?.goal) ? record!.goal : fallbackGoal;
   return { count, known, unknown, goal, percent: Math.min(100, Math.round((count / goal) * 100)) };
 }
 
@@ -99,96 +70,41 @@ function ProgressBar({ percent }: { percent: number }) {
   return <div className="admin-progress" aria-label={`完成 ${percent}%`}><span style={{ width: `${percent}%` }} /></div>;
 }
 
-export default function AdminDashboard() {
-  const [results, setResults] = useState<Record<string, Result>>({});
-  const [dailyActivity, setDailyActivity] = useState<DailyActivity>({});
-  const [currentGoal, setCurrentGoal] = useState(20);
+export default function AdminDashboard({
+  initialSnapshot,
+  vocabulary,
+}: {
+  initialSnapshot: LearningSnapshot;
+  vocabulary: VocabularySummaryEntry[];
+}) {
+  const results = initialSnapshot.results;
+  const activity = initialSnapshot.dailyActivity;
+  const currentGoal = initialSnapshot.settings.goal;
+  const phraseWords = useMemo(() => vocabulary.filter((word) => word.phase === "phrases"), [vocabulary]);
+  const screeningWords = useMemo(() => vocabulary.filter((word) => word.phase !== "phrases"), [vocabulary]);
+  const screeningIds = useMemo(() => new Set(screeningWords.map((word) => word.id)), [screeningWords]);
   const [calendarMonth, setCalendarMonth] = useState(() => {
-    const now = new Date();
-    return new Date(now.getFullYear(), now.getMonth(), 1);
+    const [year, month] = initialSnapshot.today.split("-").map(Number);
+    return new Date(year, month - 1, 1);
   });
-  const [hydrated, setHydrated] = useState(false);
 
-  useEffect(() => {
-    try {
-      const stored = localStorage.getItem(RESULT_KEY) || localStorage.getItem(LEGACY_RESULT_KEY) || "{}";
-      const original = JSON.parse(stored) as Record<string, StoredResult>;
-      const wordIds = new Set(vocabulary.map((word) => word.id));
-      const legacyMap = new Map(
-        vocabulary.filter((word) => word.legacyPetId).map((word) => [word.legacyPetId, word.id]),
-      );
-      const normalized: Record<string, Result> = {};
-      Object.entries(original).forEach(([id, result]) => {
-        const currentId = wordIds.has(id) ? id : legacyMap.get(id);
-        if (!currentId) return;
-        normalized[currentId] = {
-          ...result,
-          status: result.status === "known" ? "known" : "unknown",
-        };
-      });
-      setResults(normalized);
-    } catch {
-      setResults({});
-    }
-    try {
-      const storedSettings = localStorage.getItem(SETTINGS_KEY) || localStorage.getItem(LEGACY_SETTINGS_KEY) || "{}";
-      const settings = JSON.parse(storedSettings) as { goal?: number };
-      setCurrentGoal(GOAL_OPTIONS.includes(settings.goal || 0) ? settings.goal! : 20);
-    } catch {
-      setCurrentGoal(20);
-    }
-    try {
-      const storedActivity = JSON.parse(localStorage.getItem(DAILY_ACTIVITY_KEY) || "{}") as DailyActivity;
-      const normalizedActivity: DailyActivity = {};
-      Object.entries(storedActivity).forEach(([day, record]) => {
-        if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || !record || typeof record !== "object") return;
-        const words: Record<string, ResultStatus> = {};
-        Object.entries(record.words || {}).forEach(([id, status]) => {
-          if (screeningIds.has(id)) words[id] = status === "known" ? "known" : "unknown";
-        });
-        normalizedActivity[day] = {
-          goal: GOAL_OPTIONS.includes(record.goal) ? record.goal : 20,
-          words,
-        };
-      });
-      setDailyActivity(normalizedActivity);
-    } catch {
-      setDailyActivity({});
-    }
-    setHydrated(true);
-  }, []);
-
-  const activity = useMemo(() => {
-    const merged: DailyActivity = Object.fromEntries(
-      Object.entries(dailyActivity).map(([day, record]) => [day, { goal: record.goal, words: { ...record.words } }]),
-    );
-    screeningWords.forEach((word) => {
-      const result = results[word.id];
-      if (!result) return;
-      const date = new Date(result.updatedAt);
-      if (Number.isNaN(date.getTime())) return;
-      const day = localDay(date);
-      const current = merged[day] || { goal: currentGoal, words: {} };
-      if (!current.words[word.id]) current.words[word.id] = result.status;
-      merged[day] = current;
-    });
-    return merged;
-  }, [currentGoal, dailyActivity, results]);
-
-  const overview = useMemo(() => summarize(screeningWords, results), [results]);
+  const overview = useMemo(() => summarize(screeningWords, results), [results, screeningWords]);
   const pet = useMemo(
     () => summarize(screeningWords.filter((word) => word.sourceScope === "PET" || word.sourceScope === "PET+小托福"), results),
-    [results],
+    [results, screeningWords],
   );
   const junior = useMemo(
     () => summarize(screeningWords.filter((word) => word.sourceScope === "小托福" || word.sourceScope === "PET+小托福"), results),
-    [results],
+    [results, screeningWords],
   );
   const phases = useMemo(
     () => phaseDetails.map((item) => ({ ...item, summary: summarize(screeningWords.filter((word) => word.phase === item.phase), results) })),
-    [results],
+    [results, screeningWords],
   );
-  const today = useMemo(() => summarizeDay(activity[localDay()], currentGoal).count, [activity, currentGoal]);
+  const today = useMemo(
+    () => summarizeDay(activity[initialSnapshot.today], currentGoal, screeningIds).count,
+    [activity, currentGoal, initialSnapshot.today, screeningIds],
+  );
   const calendar = useMemo(() => {
     const year = calendarMonth.getFullYear();
     const month = calendarMonth.getMonth();
@@ -199,7 +115,7 @@ export default function AdminDashboard() {
     ];
     for (let day = 1; day <= totalDays; day += 1) {
       const dateKey = `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
-      cells.push({ day, dateKey, summary: summarizeDay(activity[dateKey], currentGoal) });
+      cells.push({ day, dateKey, summary: summarizeDay(activity[dateKey], currentGoal, screeningIds) });
     }
     while (cells.length % 7) cells.push(null);
     const activeDays = cells.filter((cell) => cell && cell.summary.count > 0);
@@ -211,18 +127,16 @@ export default function AdminDashboard() {
       completedDays: activeDays.filter((cell) => cell && cell.summary.count >= cell.summary.goal).length,
       totalJudgements: activeDays.reduce((sum, cell) => sum + (cell?.summary.count || 0), 0),
     };
-  }, [activity, calendarMonth, currentGoal]);
+  }, [activity, calendarMonth, currentGoal, screeningIds]);
   const overlapCount = screeningWords.filter((word) => word.sourceScope === "PET+小托福").length;
   const petPhraseCount = phraseWords.filter((word) => word.sourceScope === "PET" || word.sourceScope === "PET+小托福").length;
   const juniorPhraseCount = phraseWords.filter((word) => word.sourceScope === "小托福" || word.sourceScope === "PET+小托福").length;
-  const now = new Date();
-  const canGoNext = calendarMonth.getFullYear() < now.getFullYear()
-    || (calendarMonth.getFullYear() === now.getFullYear() && calendarMonth.getMonth() < now.getMonth());
+  const [currentYear, currentMonth] = initialSnapshot.today.split("-").map(Number);
+  const canGoNext = calendarMonth.getFullYear() < currentYear
+    || (calendarMonth.getFullYear() === currentYear && calendarMonth.getMonth() < currentMonth - 1);
   const shiftCalendarMonth = (offset: number) => {
     setCalendarMonth((current) => new Date(current.getFullYear(), current.getMonth() + offset, 1));
   };
-
-  if (!hydrated) return <div className="loading-cover">正在读取学习记录…</div>;
 
   return (
     <main className="admin-shell">
@@ -231,7 +145,7 @@ export default function AdminDashboard() {
           <span className="brand-mark" aria-hidden="true">A·</span>
           <div><strong>学习记录</strong><span>家庭学习后台</span></div>
         </div>
-        <a className="admin-back" href="/">← 返回认词</a>
+        <Link className="admin-back" href="/">← 返回认词</Link>
       </header>
 
       <section className="admin-hero">
@@ -275,8 +189,8 @@ export default function AdminDashboard() {
             if (!cell) return <div className="calendar-day is-empty" key={`empty-${index}`} aria-hidden="true" />;
             const hasActivity = cell.summary.count > 0;
             const completed = hasActivity && cell.summary.count >= cell.summary.goal;
-            const isToday = cell.dateKey === localDay();
-            const isFuture = cell.dateKey > localDay();
+            const isToday = cell.dateKey === initialSnapshot.today;
+            const isFuture = cell.dateKey > initialSnapshot.today;
             return (
               <article
                 className={`calendar-day${hasActivity ? " has-activity" : ""}${completed ? " is-complete" : ""}${isToday ? " is-today" : ""}${isFuture ? " is-future" : ""}`}
@@ -349,7 +263,7 @@ export default function AdminDashboard() {
         </div>
       </section>
 
-      <footer className="admin-footer">记录仅保存在当前浏览器中。本页面不提供清空数据功能。</footer>
+      <footer className="admin-footer">记录保存在云主机数据库中，所有已登录设备共享同一份进度。本页面不提供清空数据功能。</footer>
     </main>
   );
 }

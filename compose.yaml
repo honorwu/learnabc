@@ -1,0 +1,20 @@
+services:
+  learnabc:
+    build:
+      context: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${APP_PORT:-3000}:3000"
+    env_file:
+      - .env.local
+    environment:
+      NODE_ENV: production
+      VOCABULARY_DATABASE_PATH: /app/data/vocabulary.db
+      LEARNING_DATABASE_PATH: /data/learning.db
+      APP_TIME_ZONE: Asia/Shanghai
+    volumes:
+      - learnabc-data:/data
+
+volumes:
+  learnabc-data:
+    name: learnabc-data
